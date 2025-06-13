@@ -14,8 +14,10 @@ import reactor.core.publisher.Mono;
 
 
 import java.time.Duration;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 @RestController
 public class ChargingService {
@@ -91,19 +93,24 @@ public class ChargingService {
 
                     double batteryLevel = info.getBattery_capacity_kWh(); //batteriets ladding i kWh
 
-                    int bestHour = 0;
+                    int bestHour = -1;
                     double minValue = Double.MAX_VALUE;
+                    double selectedChargingPower = 0.0;
 
                     //kollar igenom timmarna, för att hitta den med bäst pris
                     //jämför pris och förbrukning
 
                     for (int i = 0; i < 24; i++){
                         double current = basedOnPrice ? prices.get(i) : load.get(i);
-                        double totalLoad = load.get(i) + 7.4;
 
-                        if(current < minValue && totalLoad <= 11 && batteryLevel < 80) {
+                        double baseLoad = load.get(i);
+                        double availablePower = 11.0 - baseLoad;
+                        double chargingPower = Math.min(availablePower, 7.4);
+
+                        if(chargingPower > 0 && current < minValue && batteryLevel < 80) {
                             minValue = current;
                             bestHour = i;
+                            selectedChargingPower = chargingPower;
                         } //om den hittas en tid där det är minst förbrukning/bäst pris kommer den laddas upp till 80%
                     }
 
@@ -113,11 +120,13 @@ public class ChargingService {
                     } //säger till att det batteriet redan är 80% och laddar inte mer
 
                     //om batteriet inte är 80% och det är en timme (med det bästa priset) så startas laddningen
-                    System.out.println("Startar laddning under timme: " + bestHour);
+                    System.out.println("Startar laddning under timme: " + bestHour + " med effekt: " + selectedChargingPower + " kW");
+
+                    double finalChargingPower = selectedChargingPower;
 
                   return startCharging()
                           .then(Mono.defer(() ->{
-                  ongoingCharge = pollBatteryUntil(80).subscribe(); //du kan också stoppa innan 80 om du vill
+                  ongoingCharge = pollBatteryUntil(80, finalChargingPower).subscribe(); //du kan också stoppa innan 80 om du vill
                   return Mono.empty();
                   }));
                 });
@@ -126,14 +135,18 @@ public class ChargingService {
 
 
     //kollar batteriet till det är 80%
-    private Mono<Void> pollBatteryUntil(double targetPercent) {
+    private Mono<Void> pollBatteryUntil(double targetPercent, double chargingPower) {
         return Flux.interval(Duration.ofSeconds(2))
                 .flatMap(tick -> getLiveInfo())
                 .map(info -> {
+
                     double currentCapacity = info.getBattery_capacity_kWh(); //den aktuella batterikapaciteten i kWh
                     double batteryPercent = (currentCapacity / maxBatteryCapacityKHW) * 100;
                     //jag delar den aktuella med max kapaciteten, och sedan gånger 100 för att få procenten
-                    System.out.printf("Laddar... Batterinivå: %.2f%%\n", batteryPercent);
+
+                    double totalLoad = info.getBase_current_load();
+
+                    System.out.printf("Laddar... Batterinivå: %.2f%%4 | Total förbrukning: %.2f kW\n", batteryPercent, totalLoad);
                     return batteryPercent;
                 })
                 .takeUntil(percent -> percent >= targetPercent)
